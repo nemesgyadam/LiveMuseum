@@ -101,6 +101,7 @@ const PORTRAIT_FILES = [
   "Night Sky.mp4",
   "The Garden.mp4",
   "Time.mp4",
+  "Mona Lisa.mp4",
 ];
 const RING_RADIUS = 15.5;
 const ARTWORKS = PORTRAIT_FILES.map((file, i) => {
@@ -127,55 +128,34 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.1;
 
-// ── PROCEDURAL SKY SHADER (no seams, atmospheric) ────────────────────────────
+// ── SKY PHOTO (mirrored repeat = seamless) ───────────────────────────────────
+// Load the photo, then build a mirrored canvas so left==right edge → no seam.
 const skyGeo = new THREE.SphereGeometry(800, 48, 24);
-const skyMat = new THREE.ShaderMaterial({
-  side: THREE.BackSide,
-  uniforms: {
-    topColor:     { value: new THREE.Color(0x4a78b8) },
-    midColor:     { value: new THREE.Color(0xc8b896) },
-    horizonColor: { value: new THREE.Color(0xe8c89a) },
-    groundColor:  { value: new THREE.Color(0x3a4a5a) },
-    sunDir:       { value: new THREE.Vector3(80, 120, -60).normalize() },
-    sunColor:     { value: new THREE.Color(0xfff2d8) },
-  },
-  vertexShader: `
-    varying vec3 vWorldDir;
-    void main() {
-      vWorldDir = normalize((modelMatrix * vec4(position, 1.0)).xyz);
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: `
-    uniform vec3 topColor;
-    uniform vec3 midColor;
-    uniform vec3 horizonColor;
-    uniform vec3 groundColor;
-    uniform vec3 sunDir;
-    uniform vec3 sunColor;
-    varying vec3 vWorldDir;
-    void main() {
-      vec3 dir = normalize(vWorldDir);
-      float h = dir.y;
-      vec3 col;
-      if (h > 0.0) {
-        float t1 = smoothstep(0.0, 0.15, h);
-        float t2 = smoothstep(0.15, 0.6, h);
-        col = mix(horizonColor, midColor, t1);
-        col = mix(col, topColor, t2);
-      } else {
-        col = mix(horizonColor, groundColor, smoothstep(0.0, -0.3, h));
-      }
-      // Sun disc + glow
-      float sunDot = max(dot(dir, normalize(sunDir)), 0.0);
-      float sunGlow = pow(sunDot, 8.0) * 0.35;
-      float sunDisc = smoothstep(0.9975, 0.9995, sunDot);
-      col += sunColor * sunGlow;
-      col += sunColor * sunDisc * 2.0;
-      gl_FragColor = vec4(col, 1.0);
-    }
-  `,
-});
+const skyMat = new THREE.MeshBasicMaterial({ side: THREE.BackSide });
+
+new THREE.TextureLoader().load(
+  'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=4000&q=85&fit=crop',
+  (tex) => {
+    const img = tex.image;
+    const w = img.width, h = img.height;
+    const mc = document.createElement('canvas');
+    mc.width = w * 2; mc.height = h;
+    const mctx = mc.getContext('2d');
+    mctx.drawImage(img, 0, 0);
+    mctx.save();
+    mctx.translate(w * 2, 0);
+    mctx.scale(-1, 1);
+    mctx.drawImage(img, 0, 0);
+    mctx.restore();
+    const mirroredTex = new THREE.CanvasTexture(mc);
+    mirroredTex.mapping = THREE.EquirectangularReflectionMapping;
+    mirroredTex.minFilter = THREE.LinearFilter;
+    mirroredTex.magFilter = THREE.LinearFilter;
+    skyMat.map = mirroredTex;
+    skyMat.needsUpdate = true;
+    renderer.render(scene, cam);
+  }
+);
 scene.add(new THREE.Mesh(skyGeo, skyMat));
 
 // ── SUN ──────────────────────────────────────────────────────────────────────
@@ -394,18 +374,12 @@ const videoElements = {};
 function makeVideoTexture(url) {
   const vid = document.createElement('video');
   vid.src = url;
-  vid.loop = false;
-  vid.muted = false;
-  vid.volume = 0.6;
+  vid.loop = true;
+  vid.muted = true;
   vid.playsInline = true;
   vid.crossOrigin = 'anonymous';
+  vid.preload = 'auto';
   vid.load();
-  
-  vid.addEventListener('ended', () => {
-    vid.currentTime = 0;
-    vid.play().catch(() => {});
-  });
-  
   const tex = new THREE.VideoTexture(vid);
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
@@ -424,37 +398,68 @@ ARTWORKS.forEach((art, i) => {
   frame.castShadow = true;
   g.add(frame);
 
-  // Canvas material — video texture if url provided, else flat color
+  // Canvas — video A (main) + video B (next loop, crossfade target)
   let canvasMat;
   if (art.url) {
-    const { vid, tex } = makeVideoTexture(art.url);
-    videoElements[i] = vid;
-    canvasMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 1 });
-    
-    const FADE_DURATION = 0.5;
-    vid.addEventListener('timeupdate', () => {
-      const remaining = vid.duration - vid.currentTime;
-      if (remaining < FADE_DURATION) {
-        canvasMat.opacity = remaining / FADE_DURATION;
-      } else if (vid.currentTime < FADE_DURATION) {
-        canvasMat.opacity = vid.currentTime / FADE_DURATION;
-      } else {
-        canvasMat.opacity = 1;
+    const { vid: vidA, tex: texA } = makeVideoTexture(art.url);
+    const { vid: vidB, tex: texB } = makeVideoTexture(art.url);
+    videoElements[i] = vidA;
+
+    const matA = new THREE.MeshBasicMaterial({ map: texA, transparent: true, opacity: 1, depthWrite: true });
+    const matB = new THREE.MeshBasicMaterial({ map: texB, transparent: true, opacity: 0, depthWrite: false });
+
+    const meshA = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 4.0), matA);
+    meshA.position.z = 0.11;
+    meshA.userData.artIndex = i;
+    meshA.userData.videoElement = vidA;
+    g.add(meshA);
+    paintingMeshes.push(meshA);
+
+    const meshB = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 4.0), matB);
+    meshB.position.z = 0.12;
+    g.add(meshB);
+
+    const FADE_DURATION = 0.8;
+    let fading = false;
+
+    vidA.addEventListener('timeupdate', () => {
+      if (!vidA.duration) return;
+      const remaining = vidA.duration - vidA.currentTime;
+      if (remaining < FADE_DURATION && !fading) {
+        fading = true;
+        vidB.currentTime = 0;
+        vidB.play().catch(() => {});
+      }
+      if (fading) {
+        const t = 1 - (remaining / FADE_DURATION);
+        matB.opacity = Math.min(1, Math.max(0, t));
+        matA.opacity = 1 - matB.opacity;
       }
     });
+
+    vidA.addEventListener('ended', () => {
+      // swap: B becomes the new A
+      matA.map = texB; matA.opacity = 1; matA.depthWrite = true;
+      matB.opacity = 0; matB.depthWrite = false;
+      vidA.currentTime = 0;
+      fading = false;
+      // keep looping: B will next time be the "pre-loaded" one
+      vidA.play().catch(() => {});
+    });
+
+    canvasMat = matA;
   } else {
     canvasMat = new THREE.MeshStandardMaterial({ color: art.color, roughness: 0.85 });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(2.6, 4.0, 0.06), canvasMat);
+    mesh.position.z = 0.1;
+    mesh.userData.artIndex = i;
+    mesh.userData.videoElement = null;
+    g.add(mesh);
+    paintingMeshes.push(mesh);
   }
 
-  const mesh = new THREE.Mesh(
-    new THREE.BoxGeometry(2.6, 4.0, 0.06),
-    canvasMat
-  );
-  mesh.position.z = 0.1;
-  mesh.userData.artIndex = i;
-  mesh.userData.videoElement = art.url ? videoElements[i] : null;
-  g.add(mesh);
-  paintingMeshes.push(mesh);
+  // Dummy ref for non-video path (already pushed above for video)
+  const mesh = paintingMeshes[paintingMeshes.length - 1];
 
   // Spot from above-front
   const spot = new THREE.SpotLight(0xfffae8, 2.2, 10, Math.PI/10, 0.45);

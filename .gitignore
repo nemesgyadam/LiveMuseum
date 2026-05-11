@@ -1,0 +1,10 @@
+# Original (large) video files - not needed for deployment
+Portraits/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.log

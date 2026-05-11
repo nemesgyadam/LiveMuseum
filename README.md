@@ -1,4 +1,4 @@
-# LiveMuseum — NEXUS
+# LiveMuseum 
 
 An immersive 3D AI art gallery experience running entirely in the browser.
 
